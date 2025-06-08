@@ -1,0 +1,192 @@
+#include <winsock2.h>
+#include <iostream>
+#include <fstream>
+
+#pragma comment(lib, "Ws2_32.lib")
+
+#define PORT 69
+#define BUFFER_SIZE 516
+#define BLOCK_SIZE 512
+
+enum Opcode { RRQ = 1, WRQ, DATA, ACK, ERROR };
+
+// TFTP Error Codes from RFC 1350
+enum TFTPError {
+    NotDefined = 0,
+    FileNotFound = 1,
+    AccessViolation = 2,
+    DiskFull = 3,
+    IllegalOperation = 4,
+    UnknownTransferID = 5,
+    FileAlreadyExists = 6,
+    NoSuchUser = 7
+};
+
+void sendError(SOCKET sock, sockaddr_in &client, TFTPError code, const char* msg) {
+    char buffer[BUFFER_SIZE];
+    buffer[0] = 0;
+    buffer[1] = ERROR;
+    buffer[2] = 0;
+    buffer[3] = code;
+    strcpy(buffer + 4, msg);
+    int len = strlen(msg);
+    buffer[4 + len] = 0;
+
+    sendto(sock, buffer, 5 + len, 0, (sockaddr*)&client, sizeof(client));
+}
+
+void sendAck(SOCKET sock, sockaddr_in &client, uint16_t block) {
+    char ack[4] = {0, ACK, static_cast<char>(block >> 8), static_cast<char>(block)};
+    sendto(sock, ack, 4, 0, (sockaddr*)&client, sizeof(client));
+}
+
+void handleRRQ(SOCKET sock, sockaddr_in &client, const std::string& filename) {
+    std::ifstream file(filename, std::ios::binary);
+    if (!file.is_open()) {
+        sendError(sock, client, FileNotFound, "File not found");
+        return;
+    }
+
+    char packet[BUFFER_SIZE], ack[4];
+    uint16_t block = 1;
+    socklen_t len = sizeof(client);
+    int retries;
+
+    while (!file.eof()) {
+        packet[0] = 0; packet[1] = DATA;
+        packet[2] = block >> 8; packet[3] = block;
+        file.read(packet + 4, BLOCK_SIZE);
+        int bytes = file.gcount();
+
+        retries = 0;
+        while (retries < 3) {
+            sendto(sock, packet, bytes + 4, 0, (sockaddr*)&client, len);
+
+            int ackLen = recvfrom(sock, ack, sizeof(ack), 0, (sockaddr*)&client, &len);
+            if (ackLen >= 4 && ack[1] == ACK &&
+                (uint8_t)ack[2] == (block >> 8) && (uint8_t)ack[3] == (block & 0xFF)) {
+                break;  // valid ACK
+            }
+
+            ++retries;
+            std::cerr << "[RRQ] Timeout or bad ACK, retrying block " << block << " (" << retries << "/3)\n";
+        }
+
+        if (retries == 3) {
+            sendError(sock, client, NotDefined, "Transfer timeout");
+            file.close();
+            return;
+        }
+
+        ++block;
+        if (bytes < BLOCK_SIZE) break;  // final block
+    }
+
+    file.close();
+}
+
+void handleWRQ(SOCKET sock, sockaddr_in &client, const std::string& filename) {
+    std::ofstream file(filename, std::ios::binary);
+    if (!file.is_open()) {
+        sendError(sock, client, AccessViolation, "Cannot write file");
+        return;
+    }
+
+    sendAck(sock, client, 0); // ACK for WRQ
+
+    char buffer[BUFFER_SIZE];
+    uint16_t expectedBlock = 1;
+    socklen_t len = sizeof(client);
+    int retries;
+
+    while (true) {
+        retries = 0;
+
+        while (retries < 3) {
+            int bytes = recvfrom(sock, buffer, BUFFER_SIZE, 0, (sockaddr*)&client, &len);
+            if (bytes >= 4 && buffer[1] == DATA) {
+                uint16_t block = (buffer[2] << 8) | buffer[3];
+                if (block == expectedBlock) {
+                    file.write(buffer + 4, bytes - 4);
+                    sendAck(sock, client, expectedBlock++);
+                    break;
+                } else if (block < expectedBlock) {
+                    // resend previous ACK (duplicate packet)
+                    sendAck(sock, client, block);
+                }
+            }
+
+            ++retries;
+            std::cerr << "[WRQ] Timeout or bad block, retrying (" << retries << "/3)\n";
+        }
+
+        if (retries == 3) {
+            sendError(sock, client, NotDefined, "Transfer timeout");
+            file.close();
+            return;
+        }
+
+        if (retries == 0 && BUFFER_SIZE < 516) break;
+    }
+
+    file.close();
+}
+
+std::pair<std::string, std::string> parseRequest(const char* buffer, int len) {
+    std::string filename, mode;
+    int i = 2;
+
+    while (i < len && buffer[i] != 0) filename += buffer[i++];
+    ++i;
+    while (i < len && buffer[i] != 0) mode += tolower(buffer[i++]);
+
+    return {filename, mode};
+}
+
+int main() {
+    WSADATA wsa;
+    WSAStartup(MAKEWORD(2, 2), &wsa);
+    SOCKET sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+
+    sockaddr_in server{}, client{};
+    server.sin_family = AF_INET;
+    server.sin_port = htons(PORT);
+    server.sin_addr.s_addr = INADDR_ANY;
+    bind(sock, (sockaddr*)&server, sizeof(server));
+
+    // Set timeout: 3 seconds for receiving ACK/DATA
+    int timeoutMs = 3000;
+    setsockopt(sock, SOL_SOCKET, SO_RCVTIMEO, (char*)&timeoutMs, sizeof(timeoutMs));
+
+    std::cout << "RFC 1350 TFTP Server with timeout started on port 69...\n";
+
+    while (true) {
+        char buffer[BUFFER_SIZE];
+        int clientLen = sizeof(client);
+        int bytes = recvfrom(sock, buffer, BUFFER_SIZE, 0,
+                             (sockaddr*)&client, &clientLen);
+
+        if (bytes < 4) continue;
+
+        int opcode = buffer[1];
+        auto [filename, mode] = parseRequest(buffer, bytes);
+        std::cout << "Request: " << filename << " | Mode: " << mode << "\n";
+
+        if (mode != "octet") {
+            sendError(sock, client, IllegalOperation, "Only octet mode supported");
+            continue;
+        }
+
+        if (opcode == RRQ) {
+            handleRRQ(sock, client, filename);
+        } else if (opcode == WRQ) {
+            handleWRQ(sock, client, filename);
+        } else {
+            sendError(sock, client, IllegalOperation, "Invalid TFTP opcode");
+        }
+    }
+
+    closesocket(sock);
+    WSACleanup();
+    return 0;
+}
