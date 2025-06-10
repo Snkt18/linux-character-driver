@@ -1,0 +1,197 @@
+// TFTP Server using Winsock with support for RFC 1350, 2347, 2348, and 2349
+// Handles standard TFTP requests, plus optional blocksize and timeout negotiation via OACK
+// Modularized by functionality with detailed inline documentation
+
+#include <iostream>
+#include <fstream>
+#include <string>
+#include <map>
+#include <winsock2.h>
+#include <ws2tcpip.h>
+
+#pragma comment(lib, "Ws2_32.lib")
+
+// --- Protocol Constants ---
+#define MAX_PACKET_SIZE 65464                  // Maximum UDP packet size for TFTP
+#define DEFAULT_BLOCK_SIZE 512                 // Default block size if not negotiated
+#define DEFAULT_TIMEOUT 5                      // Default timeout in seconds if not negotiated
+#define OPCODE_RRQ 1                           // Read request
+#define OPCODE_WRQ 2                           // Write request
+#define OPCODE_DATA 3                          // Data packet
+#define OPCODE_ACK 4                           // Acknowledgement packet
+#define OPCODE_ERROR 5                         // Error packet
+#define OPCODE_OACK 6                          // Option acknowledgement packet (RFC 2347)
+
+// --- Global Variables ---
+SOCKET serverSocket;                          // Server socket handle
+sockaddr_in clientAddr;                       // Client address info
+int clientAddrLen = sizeof(clientAddr);       // Length of client address
+char ftproot[256];                            // Root directory for file operations
+int negotiatedBlockSize = DEFAULT_BLOCK_SIZE; // Current session's block size
+int negotiatedTimeout = DEFAULT_TIMEOUT;      // Current session's timeout value
+
+// Send an ERROR packet with a specified error code and message
+void sendError(int error_no, const char* msg) {
+    char buffer[MAX_PACKET_SIZE];
+    buffer[0] = 0;
+    buffer[1] = OPCODE_ERROR;
+    buffer[2] = 0;
+    buffer[3] = error_no;
+    strcpy(buffer + 4, msg);
+    int len = 4 + strlen(msg) + 1;
+    sendto(serverSocket, buffer, len, 0, (sockaddr*)&clientAddr, clientAddrLen);
+}
+
+// Send an ACK packet acknowledging a specific block number
+void sendAck(uint16_t block) {
+    char buffer[4];
+    buffer[0] = 0;
+    buffer[1] = OPCODE_ACK;
+    buffer[2] = (block >> 8) & 0xFF;
+    buffer[3] = block & 0xFF;
+    sendto(serverSocket, buffer, 4, 0, (sockaddr*)&clientAddr, clientAddrLen);
+}
+
+// Send a DATA packet containing a block of file data
+void sendPacketData(uint16_t block, char* data, int len) {
+    char buffer[MAX_PACKET_SIZE];
+    buffer[0] = 0;
+    buffer[1] = OPCODE_DATA;
+    buffer[2] = (block >> 8) & 0xFF;
+    buffer[3] = block & 0xFF;
+    memcpy(buffer + 4, data, len);
+    sendto(serverSocket, buffer, len + 4, 0, (sockaddr*)&clientAddr, clientAddrLen);
+}
+
+// Send an Option Acknowledgement packet with negotiated key-value pairs (RFC 2347)
+void sendOACK(std::map<std::string, std::string>& options) {
+    char buffer[MAX_PACKET_SIZE];
+    int index = 0;
+    buffer[index++] = 0;
+    buffer[index++] = OPCODE_OACK;
+    for (const auto& [key, val] : options) {
+        index += sprintf(buffer + index, "%s", key.c_str()) + 1;
+        index += sprintf(buffer + index, "%s", val.c_str()) + 1;
+    }
+    sendto(serverSocket, buffer, index, 0, (sockaddr*)&clientAddr, clientAddrLen);
+}
+
+// Process a Read Request (RRQ) by reading and sending file data in blocks
+void handleGetRequest(const char* filename) {
+    std::string path = std::string(ftproot) + "/" + filename;
+    std::ifstream file(path, std::ios::binary);
+    if (!file.is_open()) {
+        sendError(1, "File not found");
+        return;
+    }
+    uint16_t block = 1;
+    char* buffer = new char[negotiatedBlockSize];
+    while (!file.eof()) {
+        file.read(buffer, negotiatedBlockSize);
+        int len = file.gcount();
+        sendPacketData(block, buffer, len);
+        recvfrom(serverSocket, buffer, MAX_PACKET_SIZE, 0, (sockaddr*)&clientAddr, &clientAddrLen);
+        if (buffer[1] != OPCODE_ACK) break;
+        block++;
+    }
+    delete[] buffer;
+    file.close();
+}
+
+// Process a Write Request (WRQ) by receiving file data in blocks and writing to file
+void handlePutRequest(const char* filename) {
+    std::string path = std::string(ftproot) + "/" + filename;
+    std::ofstream file(path, std::ios::binary);
+    if (!file.is_open()) {
+        sendError(2, "Access violation");
+        return;
+    }
+    sendAck(0); // Send initial ACK for WRQ
+    uint16_t expectedBlock = 1;
+    char* buffer = new char[MAX_PACKET_SIZE];
+    while (true) {
+        int recvLen = recvfrom(serverSocket, buffer, MAX_PACKET_SIZE, 0, (sockaddr*)&clientAddr, &clientAddrLen);
+        if (recvLen < 4 || buffer[1] != OPCODE_DATA) break;
+        uint16_t block = (buffer[2] << 8) | buffer[3];
+        if (block == expectedBlock) {
+            file.write(buffer + 4, recvLen - 4);
+            sendAck(block);
+            expectedBlock++;
+            if (recvLen < negotiatedBlockSize + 4) break; // last block means end of transfer
+        }
+    }
+    delete[] buffer;
+    file.close();
+}
+
+// Receive a single TFTP packet from the client
+int receivepkt(char* buffer) {
+    return recvfrom(serverSocket, buffer, MAX_PACKET_SIZE, 0, (sockaddr*)&clientAddr, &clientAddrLen);
+}
+
+// Main request handling loop. Waits for RRQ/WRQ and dispatches to appropriate handler
+void waitforreq() {
+    char buffer[MAX_PACKET_SIZE];
+    while (true) {
+        int len = receivepkt(buffer);
+        if (len < 4) continue;
+        int opcode = buffer[1];
+        std::string filename = buffer + 2;
+        std::string mode = buffer + 2 + filename.size() + 1;
+
+        // --- Option Parsing (RFC 2347) ---
+        std::map<std::string, std::string> options;
+        const char* ptr = buffer + 2 + filename.size() + 1 + mode.size() + 1;
+        while (ptr < buffer + len) {
+            std::string optName(ptr);
+            ptr += optName.size() + 1;
+            if (ptr >= buffer + len) break;
+            std::string optVal(ptr);
+            ptr += optVal.size() + 1;
+            options[optName] = optVal;
+        }
+
+        // --- Option Negotiation ---
+        if (!options.empty()) {
+            if (options.count("blksize")) negotiatedBlockSize = std::stoi(options["blksize"]);
+            if (options.count("timeout")) negotiatedTimeout = std::stoi(options["timeout"]);
+            sendOACK(options);
+            receivepkt(buffer); // Wait for ACK of OACK from client
+        }
+
+        // --- Handle Request Type ---
+        if (opcode == OPCODE_RRQ) {
+            handleGetRequest(filename.c_str());
+        } else if (opcode == OPCODE_WRQ) {
+            handlePutRequest(filename.c_str());
+        } else {
+            sendError(4, "Illegal TFTP operation");
+        }
+    }
+}
+
+// Initialize server socket, bind to specified port, and enter request handling loop
+int server(int port, const char* root) {
+    strcpy(ftproot, root);
+    WSADATA wsaData;
+    if (WSAStartup(MAKEWORD(2, 2), &wsaData) != 0) return 1;
+
+    serverSocket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    sockaddr_in serverAddr = {};
+    serverAddr.sin_family = AF_INET;
+    serverAddr.sin_port = htons(port);
+    serverAddr.sin_addr.s_addr = INADDR_ANY;
+
+    if (bind(serverSocket, (sockaddr*)&serverAddr, sizeof(serverAddr)) < 0) return 2;
+
+    std::cout << "TFTP Server started on port " << port << " with root: " << ftproot << "\n";
+    waitforreq();
+    closesocket(serverSocket);
+    WSACleanup();
+    return 0;
+}
+
+// Entry point to start the server on port 69 with current directory as root
+int main() {
+    return server(69, ".");
+}
