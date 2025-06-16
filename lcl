@@ -1,0 +1,167 @@
+#include <iostream>
+#include <fstream>
+#include <string>
+#include <vector>
+#include <cstring>
+
+class FileHandler {
+public:
+    uint32_t file_length;
+    uint16_t protocol_version;
+    uint16_t no_of_thw;
+
+    struct PnEntry {
+        uint8_t p_n_len;
+        char p_n[256];
+
+        uint8_t ame_len;
+        char ame[256];
+
+        uint8_t p_d_len;
+        char p_d_text[256];
+    };
+
+    struct ThwEntry {
+        uint8_t l_n_len;
+        char l_n[256];
+
+        uint8_t ser_num_len;
+        char ser_num[256];
+
+        uint16_t num_p_n;
+        std::vector<PnEntry> pn_entries;
+    };
+
+    std::vector<ThwEntry> thw_entries;
+
+    bool generateFile(const std::string& path, const std::string& filename) {
+        std::string fullPath = path;
+        if (!fullPath.empty() && fullPath.back() != '/' && fullPath.back() != '\\') fullPath += '/';
+        fullPath += filename;
+
+        std::ofstream file(fullPath, std::ios::binary);
+        if (!file.is_open()) return false;
+
+        // We'll write placeholder for file_length (4 bytes)
+        uint32_t placeholder_length = 0;
+        file.write(reinterpret_cast<char*>(&placeholder_length), sizeof(placeholder_length));
+
+        file.write(reinterpret_cast<char*>(&protocol_version), sizeof(protocol_version));
+        file.write(reinterpret_cast<char*>(&no_of_thw), sizeof(no_of_thw));
+
+        // Write each thw entry
+        for (const auto& thw : thw_entries) {
+            file.write(reinterpret_cast<const char*>(&thw.l_n_len), sizeof(thw.l_n_len));
+            file.write(thw.l_n, thw.l_n_len);
+
+            file.write(reinterpret_cast<const char*>(&thw.ser_num_len), sizeof(thw.ser_num_len));
+            file.write(thw.ser_num, thw.ser_num_len);
+
+            file.write(reinterpret_cast<const char*>(&thw.num_p_n), sizeof(thw.num_p_n));
+
+            for (const auto& pn : thw.pn_entries) {
+                file.write(reinterpret_cast<const char*>(&pn.p_n_len), sizeof(pn.p_n_len));
+                file.write(pn.p_n, pn.p_n_len);
+
+                file.write(reinterpret_cast<const char*>(&pn.ame_len), sizeof(pn.ame_len));
+                file.write(pn.ame, pn.ame_len);
+
+                file.write(reinterpret_cast<const char*>(&pn.p_d_len), sizeof(pn.p_d_len));
+                file.write(pn.p_d_text, pn.p_d_len);
+            }
+        }
+
+        // Calculate file size and rewrite file_length at the start
+        std::streampos file_end = file.tellp();
+        file_length = static_cast<uint32_t>(file_end);
+        file.seekp(0);
+        file.write(reinterpret_cast<char*>(&file_length), sizeof(file_length));
+
+        file.close();
+        return true;
+    }
+
+    bool parseFile(const std::string& path, const std::string& filename) {
+        std::string fullPath = path;
+        if (!fullPath.empty() && fullPath.back() != '/' && fullPath.back() != '\\') fullPath += '/';
+        fullPath += filename;
+
+        std::ifstream file(fullPath, std::ios::binary);
+        if (!file.is_open()) return false;
+
+        file.read(reinterpret_cast<char*>(&file_length), sizeof(file_length));
+        file.read(reinterpret_cast<char*>(&protocol_version), sizeof(protocol_version));
+        file.read(reinterpret_cast<char*>(&no_of_thw), sizeof(no_of_thw));
+
+        thw_entries.clear();
+
+        for (uint16_t i = 0; i < no_of_thw; ++i) {
+            ThwEntry thw;
+
+            file.read(reinterpret_cast<char*>(&thw.l_n_len), sizeof(thw.l_n_len));
+            if (thw.l_n_len > 0 && thw.l_n_len <= 256) {
+                file.read(thw.l_n, thw.l_n_len);
+            }
+            thw.l_n[thw.l_n_len] = '\0';
+
+            file.read(reinterpret_cast<char*>(&thw.ser_num_len), sizeof(thw.ser_num_len));
+            if (thw.ser_num_len > 0 && thw.ser_num_len <= 256) {
+                file.read(thw.ser_num, thw.ser_num_len);
+            }
+            thw.ser_num[thw.ser_num_len] = '\0';
+
+            file.read(reinterpret_cast<char*>(&thw.num_p_n), sizeof(thw.num_p_n));
+
+            thw.pn_entries.clear();
+            for (uint16_t j = 0; j < thw.num_p_n; ++j) {
+                PnEntry pn;
+
+                file.read(reinterpret_cast<char*>(&pn.p_n_len), sizeof(pn.p_n_len));
+                if (pn.p_n_len > 0 && pn.p_n_len <= 256) {
+                    file.read(pn.p_n, pn.p_n_len);
+                }
+                pn.p_n[pn.p_n_len] = '\0';
+
+                file.read(reinterpret_cast<char*>(&pn.ame_len), sizeof(pn.ame_len));
+                if (pn.ame_len > 0 && pn.ame_len <= 256) {
+                    file.read(pn.ame, pn.ame_len);
+                }
+                pn.ame[pn.ame_len] = '\0';
+
+                file.read(reinterpret_cast<char*>(&pn.p_d_len), sizeof(pn.p_d_len));
+                if (pn.p_d_len > 0 && pn.p_d_len <= 256) {
+                    file.read(pn.p_d_text, pn.p_d_len);
+                }
+                pn.p_d_text[pn.p_d_len] = '\0';
+
+                thw.pn_entries.push_back(pn);
+            }
+            thw_entries.push_back(thw);
+        }
+
+        file.close();
+        return true;
+    }
+
+    void printSummary() const {
+        std::cout << "File Length: " << file_length << "\n";
+        std::cout << "Protocol Version: " << protocol_version << "\n";
+        std::cout << "Number of THW entries: " << no_of_thw << "\n";
+
+        for (size_t i = 0; i < thw_entries.size(); ++i) {
+            const auto& thw = thw_entries[i];
+            std::cout << " THW Entry " << i + 1 << ":\n";
+            std::cout << "  l_n_len: " << (int)thw.l_n_len << ", l_n: " << thw.l_n << "\n";
+            std::cout << "  ser_num_len: " << (int)thw.ser_num_len << ", ser_num: " << thw.ser_num << "\n";
+            std::cout << "  num_p_n: " << thw.num_p_n << "\n";
+
+            for (size_t j = 0; j < thw.pn_entries.size(); ++j) {
+                const auto& pn = thw.pn_entries[j];
+                std::cout << "   Pn Entry " << j + 1 << ":\n";
+                std::cout << "    p_n_len: " << (int)pn.p_n_len << ", p_n: " << pn.p_n << "\n";
+                std::cout << "    ame_len: " << (int)pn.ame_len << ", ame: " << pn.ame << "\n";
+                std::cout << "    p_d_len: " << (int)pn.p_d_len << ", p_d_text: " << pn.p_d_text << "\n";
+            }
+        }
+    }
+};
