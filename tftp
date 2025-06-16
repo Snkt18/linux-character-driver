@@ -170,3 +170,83 @@ public:
     }
 };
 
+//.........................................................................................................
+
+#include <iostream>
+#include <fstream>
+#include <string>
+#include <cstring>  // for memset, strlen
+
+class FileHandler {
+public:
+    uint32_t file_length;
+    uint16_t protocol_version;
+    uint8_t op_acc_stat;
+    uint8_t stat_desc_len;
+    char stat_desc[257]; // 256 + 1 for safe null-termination
+
+    FileHandler() {
+        file_length = 0;
+        protocol_version = 0;
+        op_acc_stat = 0;
+        stat_desc_len = 0;
+        std::memset(stat_desc, 0, sizeof(stat_desc));
+    }
+
+    bool generateFile(const std::string& path, const std::string& filename) {
+        std::string fullPath = path;
+        if (!fullPath.empty() && fullPath.back() != '/' && fullPath.back() != '\\') {
+            fullPath += '/';
+        }
+        fullPath += filename;
+
+        std::ofstream file(fullPath, std::ios::out | std::ios::binary);
+        if (!file.is_open()) return false;
+
+        std::cout << "Writing to file: " << fullPath << std::endl;
+
+        // Calculate total file length
+        file_length = sizeof(file_length) + 2 + sizeof(protocol_version) + sizeof(op_acc_stat) +
+                      sizeof(stat_desc_len) + stat_desc_len;
+
+        file.write(reinterpret_cast<char*>(&file_length), sizeof(file_length));
+        std::cout << sizeof(file_length) << " bytes written (file_length)" << std::endl;
+
+        // Magic bytes
+        file.put('A');
+        file.put('4');
+        std::cout << "2 bytes written (magic bytes)" << std::endl;
+
+        file.write(reinterpret_cast<char*>(&protocol_version), sizeof(protocol_version));
+        std::cout << sizeof(protocol_version) << " bytes written (protocol_version)" << std::endl;
+
+        file.write(reinterpret_cast<char*>(&op_acc_stat), sizeof(op_acc_stat));
+        std::cout << sizeof(op_acc_stat) << " bytes written (op_acc_stat)" << std::endl;
+
+        file.write(reinterpret_cast<char*>(&stat_desc_len), sizeof(stat_desc_len));
+        std::cout << sizeof(stat_desc_len) << " bytes written (stat_desc_len)" << std::endl;
+
+        if (stat_desc_len > 0 && stat_desc_len <= 256) {
+            file.write(stat_desc, stat_desc_len);
+            std::cout << static_cast<int>(stat_desc_len) << " bytes written (stat_desc)" << std::endl;
+        }
+
+        file.close();
+        return true;
+    }
+
+    bool parseFile(const std::string& path, const std::string& filename) {
+        std::string fullPath = path;
+        if (!fullPath.empty() && fullPath.back() != '/' && fullPath.back() != '\\') {
+            fullPath += '/';
+        }
+        fullPath += filename;
+
+        std::ifstream file(fullPath, std::ios::binary);
+        if (!file.is_open()) return false;
+
+        file.read(reinterpret_cast<char*>(&file_length), sizeof(file_length));
+
+        char magic1, magic2;
+        file.get(magic1);
+        f
