@@ -1,56 +1,59 @@
-// tftp_packet.cpp
-bool TFTP_Packet::createRRQWithOptions(char* filename, map<string, string> options) {
-    clear();
-    addWord(TFTP_OPCODE_READ);
-    addString(filename);
-    addByte(0);
-    addString(TFTP_DEFAULT_TRANSFER_MODE);
-    addByte(0);
+class FileHandler {
+public:
+    uint32_t file_length;
+    uint16_t protocol_version;
+    uint8_t op_acc_stat;
+    uint8_t stat_desc_len;
+    char stat_desc[256]; // Assuming max length is 256
 
-    for (auto &opt : options) {
-        addString((char*)opt.first.c_str());
-        addByte(0);
-        addString((char*)opt.second.c_str());
-        addByte(0);
+    bool generateFile(const std::string& path, const std::string& filename) {
+        std::ofstream file(path + filename, std::ios::out | std::ios::binary);
+        if (!file.is_open()) return false;
+
+        std::cout << path + filename << std::endl;
+
+        file.write(reinterpret_cast<char*>(&file_length), sizeof(file_length));
+        std::cout << sizeof(file_length) << " bytes written" << std::endl;
+
+        file.write("A", 1);
+        file.write("4", 1);
+
+        file.write(reinterpret_cast<char*>(&protocol_version), sizeof(protocol_version));
+        std::cout << sizeof(protocol_version) << " bytes written" << std::endl;
+
+        file.write(reinterpret_cast<char*>(&op_acc_stat), sizeof(op_acc_stat));
+        std::cout << sizeof(op_acc_stat) << " bytes written" << std::endl;
+
+        file.write(reinterpret_cast<char*>(&stat_desc_len), sizeof(stat_desc_len));
+        std::cout << sizeof(stat_desc_len) << " bytes written" << std::endl;
+
+        if (stat_desc_len > 0 && stat_desc_len <= 256) {
+            file.write(stat_desc, stat_desc_len);
+            std::cout << static_cast<int>(stat_desc_len) << " bytes written" << std::endl;
+        }
+
+        file.close();
+        return true;
     }
-    return true;
-}
 
-// Inside your server receivePacket() logic, after reading RRQ/WRQ and You will need to add helper function readNullTerminatedString().
+    bool parseFile(const std::string& path, const std::string& filename) {
+        std::ifstream file(path + filename, std::ios::binary);
+        if (!file.is_open()) return false;
 
-int pos = strlen(filename) + strlen(TFTP_DEFAULT_TRANSFER_MODE) + 4; 
-while (pos < packet_size) {
-    string option_name = readNullTerminatedString(pos);
-    pos += option_name.length() + 1;
-    string option_value = readNullTerminatedString(pos);
-    pos += option_value.length() + 1;
-    
-    cout << "Received Option: " << option_name << " = " << option_value << endl;
-    
-    // store option & value for that client if needed
-}
+        file.read(reinterpret_cast<char*>(&file_length), sizeof(file_length));
+        char magic1, magic2;
+        file.read(&magic1, 1);
+        file.read(&magic2, 1);
+        file.read(reinterpret_cast<char*>(&protocol_version), sizeof(protocol_version));
+        file.read(reinterpret_cast<char*>(&op_acc_stat), sizeof(op_acc_stat));
+        file.read(reinterpret_cast<char*>(&stat_desc_len), sizeof(stat_desc_len));
 
- // 3. Server replies with OACK (Option Acknowledgement)
-// You will create new packet type:
+        if (stat_desc_len > 0 && stat_desc_len <= 256) {
+            file.read(stat_desc, stat_desc_len);
+            stat_desc[stat_desc_len] = '\0'; // Null-terminate if using as C-string
+        }
 
-bool TFTP_Packet::createOACK(map<string, string> options) {
-    clear();
-    addWord(6); // OACK opcode
-    for (auto &opt : options) {
-        addString((char*)opt.first.c_str());
-        addByte(0);
-        addString((char*)opt.second.c_str());
-        addByte(0);
+        file.close();
+        return true;
     }
-    return true;
-}
-
-// Client parses OACK reply
-//Client must handle OACK after sending RRQ/WRQ:
-
-
-if (received_packet.getWord(0) == 6) { // OACK
-   parseOptions(received_packet);
-   send ACK(0);
-}
-
+};
