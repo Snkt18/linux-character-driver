@@ -57,3 +57,116 @@ public:
         return true;
     }
 };
+
+// alternate 
+
+#include <iostream>
+#include <fstream>
+#include <cstdint>
+#include <cstring>
+
+class FileHandler {
+public:
+    uint32_t file_length;
+    uint16_t protocol_version;
+    uint8_t op_acc_stat;
+    uint8_t stat_desc_len;
+    char stat_desc[256]; // Max length 255 + null terminator
+
+    // Convert 16-bit integer to Big Endian
+    uint16_t toBigEndian16(uint16_t val) {
+        return (val >> 8) | (val << 8);
+    }
+
+    // Convert 32-bit integer to Big Endian
+    uint32_t toBigEndian32(uint32_t val) {
+        return ((val >> 24) & 0xFF) |
+               ((val >> 8) & 0xFF00) |
+               ((val << 8) & 0xFF0000) |
+               ((val << 24) & 0xFF000000);
+    }
+
+    uint32_t fromBigEndian32(uint32_t val) {
+        return toBigEndian32(val); // Same logic both ways
+    }
+
+    uint16_t fromBigEndian16(uint16_t val) {
+        return toBigEndian16(val);
+    }
+
+    bool generateFile(const std::string& path, const std::string& filename) {
+        std::ofstream file(path + filename, std::ios::binary);
+        if (!file.is_open()) return false;
+
+        std::cout << "Writing to: " << path + filename << std::endl;
+
+        uint32_t file_length_be = toBigEndian32(file_length);
+        uint16_t protocol_version_be = toBigEndian16(protocol_version);
+
+        file.write(reinterpret_cast<char*>(&file_length_be), sizeof(file_length_be));
+        std::cout << sizeof(file_length) << " bytes written" << std::endl;
+
+        file.write("A", 1);
+        file.write("4", 1);
+
+        file.write(reinterpret_cast<char*>(&protocol_version_be), sizeof(protocol_version_be));
+        std::cout << sizeof(protocol_version) << " bytes written" << std::endl;
+
+        file.write(reinterpret_cast<char*>(&op_acc_stat), sizeof(op_acc_stat));
+        std::cout << sizeof(op_acc_stat) << " bytes written" << std::endl;
+
+        file.write(reinterpret_cast<char*>(&stat_desc_len), sizeof(stat_desc_len));
+        std::cout << sizeof(stat_desc_len) << " bytes written" << std::endl;
+
+        if (stat_desc_len > 0 && stat_desc_len <= 255) {
+            file.write(stat_desc, stat_desc_len);
+            file.put('\0'); // Null terminator
+            std::cout << static_cast<int>(stat_desc_len) + 1 << " bytes written (string + null)" << std::endl;
+        }
+
+        file.close();
+        return true;
+    }
+
+    bool parseFile(const std::string& path, const std::string& filename) {
+        std::ifstream file(path + filename, std::ios::binary);
+        if (!file.is_open()) return false;
+
+        uint32_t file_length_be;
+        uint16_t protocol_version_be;
+
+        file.read(reinterpret_cast<char*>(&file_length_be), sizeof(file_length_be));
+        file_length = fromBigEndian32(file_length_be);
+
+        char magic1, magic2;
+        file.read(&magic1, 1);
+        file.read(&magic2, 1);
+        if (magic1 != 'A' || magic2 != '4') {
+            std::cerr << "Invalid magic bytes\n";
+            return false;
+        }
+
+        file.read(reinterpret_cast<char*>(&protocol_version_be), sizeof(protocol_version_be));
+        protocol_version = fromBigEndian16(protocol_version_be);
+
+        file.read(reinterpret_cast<char*>(&op_acc_stat), sizeof(op_acc_stat));
+        file.read(reinterpret_cast<char*>(&stat_desc_len), sizeof(stat_desc_len));
+
+        if (stat_desc_len > 0 && stat_desc_len <= 255) {
+            file.read(stat_desc, stat_desc_len);
+            stat_desc[stat_desc_len] = '\0'; // null terminate
+            char null_byte;
+            file.read(&null_byte, 1); // Read and discard the 0x00
+            if (null_byte != '\0') {
+                std::cerr << "Expected null terminator missing.\n";
+                return false;
+            }
+        } else {
+            stat_desc[0] = '\0';
+        }
+
+        file.close();
+        return true;
+    }
+};
+
