@@ -2,33 +2,32 @@
 #include <fstream>
 #include <string>
 #include <vector>
-#include <cstring>
 
 class FileHandler {
 public:
-    uint32_t file_length;
-    uint16_t protocol_version;
-    uint16_t no_of_thw;
+    int file_length;
+    short protocol_version;
+    short no_of_thw;
 
     struct PnEntry {
-        uint8_t p_n_len;
-        char p_n[256];
+        unsigned char p_n_len;
+        std::string p_n;
 
-        uint8_t ame_len;
-        char ame[256];
+        unsigned char ame_len;
+        std::string ame;
 
-        uint8_t p_d_len;
-        char p_d_text[256];
+        unsigned char p_d_len;
+        std::string p_d_text;
     };
 
     struct ThwEntry {
-        uint8_t l_n_len;
-        char l_n[256];
+        unsigned char l_n_len;
+        std::string l_n;
 
-        uint8_t ser_num_len;
-        char ser_num[256];
+        unsigned char ser_num_len;
+        std::string ser_num;
 
-        uint16_t num_p_n;
+        short num_p_n;
         std::vector<PnEntry> pn_entries;
     };
 
@@ -42,42 +41,38 @@ public:
         std::ofstream file(fullPath, std::ios::binary);
         if (!file.is_open()) return false;
 
-        // We'll write placeholder for file_length (4 bytes)
-        uint32_t placeholder_length = 0;
+        int placeholder_length = 0;
         file.write(reinterpret_cast<char*>(&placeholder_length), sizeof(placeholder_length));
-
         file.write(reinterpret_cast<char*>(&protocol_version), sizeof(protocol_version));
         file.write(reinterpret_cast<char*>(&no_of_thw), sizeof(no_of_thw));
 
-        // Write each thw entry
         for (const auto& thw : thw_entries) {
             file.write(reinterpret_cast<const char*>(&thw.l_n_len), sizeof(thw.l_n_len));
-            file.write(thw.l_n, thw.l_n_len);
+            file.write(thw.l_n.c_str(), thw.l_n_len);
 
             file.write(reinterpret_cast<const char*>(&thw.ser_num_len), sizeof(thw.ser_num_len));
-            file.write(thw.ser_num, thw.ser_num_len);
+            file.write(thw.ser_num.c_str(), thw.ser_num_len);
 
             file.write(reinterpret_cast<const char*>(&thw.num_p_n), sizeof(thw.num_p_n));
 
             for (const auto& pn : thw.pn_entries) {
                 file.write(reinterpret_cast<const char*>(&pn.p_n_len), sizeof(pn.p_n_len));
-                file.write(pn.p_n, pn.p_n_len);
+                file.write(pn.p_n.c_str(), pn.p_n_len);
 
                 file.write(reinterpret_cast<const char*>(&pn.ame_len), sizeof(pn.ame_len));
-                file.write(pn.ame, pn.ame_len);
+                file.write(pn.ame.c_str(), pn.ame_len);
 
                 file.write(reinterpret_cast<const char*>(&pn.p_d_len), sizeof(pn.p_d_len));
-                file.write(pn.p_d_text, pn.p_d_len);
+                file.write(pn.p_d_text.c_str(), pn.p_d_len);
             }
         }
 
-        // Calculate file size and rewrite file_length at the start
         std::streampos file_end = file.tellp();
-        file_length = static_cast<uint32_t>(file_end);
+        file_length = static_cast<int>(file_end);
         file.seekp(0);
         file.write(reinterpret_cast<char*>(&file_length), sizeof(file_length));
-
         file.close();
+
         return true;
     }
 
@@ -95,47 +90,38 @@ public:
 
         thw_entries.clear();
 
-        for (uint16_t i = 0; i < no_of_thw; ++i) {
+        for (short i = 0; i < no_of_thw; ++i) {
             ThwEntry thw;
 
             file.read(reinterpret_cast<char*>(&thw.l_n_len), sizeof(thw.l_n_len));
-            if (thw.l_n_len > 0 && thw.l_n_len <= 256) {
-                file.read(thw.l_n, thw.l_n_len);
-            }
-            thw.l_n[thw.l_n_len] = '\0';
+            thw.l_n.resize(thw.l_n_len);
+            file.read(&thw.l_n[0], thw.l_n_len);
 
             file.read(reinterpret_cast<char*>(&thw.ser_num_len), sizeof(thw.ser_num_len));
-            if (thw.ser_num_len > 0 && thw.ser_num_len <= 256) {
-                file.read(thw.ser_num, thw.ser_num_len);
-            }
-            thw.ser_num[thw.ser_num_len] = '\0';
+            thw.ser_num.resize(thw.ser_num_len);
+            file.read(&thw.ser_num[0], thw.ser_num_len);
 
             file.read(reinterpret_cast<char*>(&thw.num_p_n), sizeof(thw.num_p_n));
-
             thw.pn_entries.clear();
-            for (uint16_t j = 0; j < thw.num_p_n; ++j) {
+
+            for (short j = 0; j < thw.num_p_n; ++j) {
                 PnEntry pn;
 
                 file.read(reinterpret_cast<char*>(&pn.p_n_len), sizeof(pn.p_n_len));
-                if (pn.p_n_len > 0 && pn.p_n_len <= 256) {
-                    file.read(pn.p_n, pn.p_n_len);
-                }
-                pn.p_n[pn.p_n_len] = '\0';
+                pn.p_n.resize(pn.p_n_len);
+                file.read(&pn.p_n[0], pn.p_n_len);
 
                 file.read(reinterpret_cast<char*>(&pn.ame_len), sizeof(pn.ame_len));
-                if (pn.ame_len > 0 && pn.ame_len <= 256) {
-                    file.read(pn.ame, pn.ame_len);
-                }
-                pn.ame[pn.ame_len] = '\0';
+                pn.ame.resize(pn.ame_len);
+                file.read(&pn.ame[0], pn.ame_len);
 
                 file.read(reinterpret_cast<char*>(&pn.p_d_len), sizeof(pn.p_d_len));
-                if (pn.p_d_len > 0 && pn.p_d_len <= 256) {
-                    file.read(pn.p_d_text, pn.p_d_len);
-                }
-                pn.p_d_text[pn.p_d_len] = '\0';
+                pn.p_d_text.resize(pn.p_d_len);
+                file.read(&pn.p_d_text[0], pn.p_d_len);
 
                 thw.pn_entries.push_back(pn);
             }
+
             thw_entries.push_back(thw);
         }
 
@@ -151,17 +137,100 @@ public:
         for (size_t i = 0; i < thw_entries.size(); ++i) {
             const auto& thw = thw_entries[i];
             std::cout << " THW Entry " << i + 1 << ":\n";
-            std::cout << "  l_n_len: " << (int)thw.l_n_len << ", l_n: " << thw.l_n << "\n";
-            std::cout << "  ser_num_len: " << (int)thw.ser_num_len << ", ser_num: " << thw.ser_num << "\n";
+            std::cout << "  l_n: " << thw.l_n << "\n";
+            std::cout << "  ser_num: " << thw.ser_num << "\n";
             std::cout << "  num_p_n: " << thw.num_p_n << "\n";
 
             for (size_t j = 0; j < thw.pn_entries.size(); ++j) {
                 const auto& pn = thw.pn_entries[j];
                 std::cout << "   Pn Entry " << j + 1 << ":\n";
-                std::cout << "    p_n_len: " << (int)pn.p_n_len << ", p_n: " << pn.p_n << "\n";
-                std::cout << "    ame_len: " << (int)pn.ame_len << ", ame: " << pn.ame << "\n";
-                std::cout << "    p_d_len: " << (int)pn.p_d_len << ", p_d_text: " << pn.p_d_text << "\n";
+                std::cout << "    p_n: " << pn.p_n << "\n";
+                std::cout << "    ame: " << pn.ame << "\n";
+                std::cout << "    p_d_text: " << pn.p_d_text << "\n";
             }
         }
     }
 };
+
+int main() {
+    FileHandler handler;
+    handler.protocol_version = 59;
+    handler.no_of_thw = 2;
+
+    FileHandler::ThwEntry thw;
+    thw.l_n = "Line001";
+    thw.l_n_len = static_cast<unsigned char>(thw.l_n.length());
+
+    thw.ser_num = "Serial001";
+    thw.ser_num_len = static_cast<unsigned char>(thw.ser_num.length());
+
+    thw.num_p_n = 2;
+
+    FileHandler::PnEntry pn1;
+    pn1.p_n = "PartA";
+    pn1.p_n_len = static_cast<unsigned char>(pn1.p_n.length());
+
+    pn1.ame = "AssemblyA";
+    pn1.ame_len = static_cast<unsigned char>(pn1.ame.length());
+
+    pn1.p_d_text = "Part Description A";
+    pn1.p_d_len = static_cast<unsigned char>(pn1.p_d_text.length());
+
+    FileHandler::PnEntry pn2;
+    pn2.p_n = "PartB";
+    pn2.p_n_len = static_cast<unsigned char>(pn2.p_n.length());
+
+    pn2.ame = "AssemblyB";
+    pn2.ame_len = static_cast<unsigned char>(pn2.ame.length());
+
+    pn2.p_d_text = "Part Description B";
+    pn2.p_d_len = static_cast<unsigned char>(pn2.p_d_text.length());
+
+    thw.pn_entries.push_back(pn1);
+    thw.pn_entries.push_back(pn2);
+
+    handler.thw_entries.push_back(thw);
+
+    FileHandler::ThwEntry thw1;
+    thw1.l_n = "Line002";
+    thw1.l_n_len = static_cast<unsigned char>(thw1.l_n.length());
+
+    thw1.ser_num = "Serial002";
+    thw1.ser_num_len = static_cast<unsigned char>(thw1.ser_num.length());
+
+    thw1.num_p_n = 1;
+
+    FileHandler::PnEntry pn3;
+    pn3.p_n = "PartC";
+    pn3.p_n_len = static_cast<unsigned char>(pn3.p_n.length());
+
+    pn3.ame = "AssemblyC";
+    pn3.ame_len = static_cast<unsigned char>(pn3.ame.length());
+
+    pn3.p_d_text = "Part Description C";
+    pn3.p_d_len = static_cast<unsigned char>(pn3.p_d_text.length());
+
+    thw1.pn_entries.push_back(pn3);
+    handler.thw_entries.push_back(thw1);
+
+    std::string path = ".";
+    std::string filename = "test.LCL";
+
+    if (handler.generateFile(path, filename)) {
+        std::cout << "✅ File written successfully: " << filename << "\n";
+    } else {
+        std::cerr << "❌ Failed to write file.\n";
+        return 1;
+    }
+
+    FileHandler reader;
+    if (reader.parseFile(path, filename)) {
+        std::cout << "✅ File parsed successfully.\n";
+        reader.printSummary();
+    } else {
+        std::cerr << "❌ Failed to read file.\n";
+        return 1;
+    }
+
+    return 0;
+}
