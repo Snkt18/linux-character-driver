@@ -217,18 +217,18 @@ int main() {
     std::string filename = "test.LCL";
 
     if (handler.generateFile(path, filename)) {
-        std::cout << "✅ File written successfully: " << filename << "\n";
+        std::cout << "File written successfully: " << filename << "\n";
     } else {
-        std::cerr << "❌ Failed to write file.\n";
+        std::cerr << "Failed to write file.\n";
         return 1;
     }
 
     FileHandler reader;
     if (reader.parseFile(path, filename)) {
-        std::cout << "✅ File parsed successfully.\n";
+        std::cout << " File parsed successfully.\n";
         reader.printSummary();
     } else {
-        std::cerr << "❌ Failed to read file.\n";
+        std::cerr << " Failed to read file.\n";
         return 1;
     }
 
