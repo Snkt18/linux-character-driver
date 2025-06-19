@@ -1,4 +1,4 @@
-// settings.json
+// settings.json (compiler path)
 {
     "remote.SSH.remotePlatform": {
         "192.168.50.159": "linux",
@@ -13,4 +13,23 @@
         
         ""
     ]
+}
+
+// compile commands 
+
+{
+    "remote.SSH.remotePlatform": {
+        "192.168.50.159": "linux",
+        "192.168.50.160": "linux"
+    },
+    "emmet.includeLanguages": {
+        "javascript": "javascriptreact"
+    },
+    "workbench.iconTheme": "vscode-great-icons",
+    "editor.comments.ignoreEmptyLines": false,
+    "C_Cpp.default.compileCommands": [
+        
+        ""
+    ],
+    "C_Cpp.default.compilerPath": ""
 }
