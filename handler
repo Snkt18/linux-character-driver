@@ -1,0 +1,123 @@
+// tftp_client.cpp
+
+void informationHandler(TFTPClient& client, const std::string& lci_file, const std::string& lcl_file, const std::string& lcs_file, int blksize = 512, bool delay_present = false) {
+    std::cout << "\n=== Starting Client (THW) Protocol ===" << std::endl;
+
+    // Step 1: Request LCI (RRQ)
+    std::cout << "\n[Step 1] Sending RRQ for LCI file: " << lci_file << std::endl;
+    client.request_download(lci_file, blksize);  // Client requests LCI
+
+    // Step 2: Upload LCL file (WRQ)
+    std::cout << "\n[Step 2] Sending WRQ for LCL file: " << lcl_file << std::endl;
+    client.request_upload(lcl_file, blksize);  // Upload LCL file
+
+    // Step 3: If delay is present, upload LCS file
+    if (delay_present) {
+        std::cout << "\n[Step 3] Sending WRQ for LCS file due to delay: " << lcs_file << std::endl;
+        client.request_upload(lcs_file, blksize);  // Upload LCS file if delay present
+    }
+
+    // Step 4: Wait for the final status code from server (0x0003)
+    sockaddr_in recv_addr;
+    int addr_len = sizeof(recv_addr);
+    char buffer[BUFFER_SIZE];
+    int recv_len = recvfrom(client.sockfd, buffer, BUFFER_SIZE, 0, (sockaddr*)&recv_addr, &addr_len);
+
+    if (recv_len >= 4) {
+        uint16_t status_code = (buffer[2] << 8) | buffer[3];
+        if (status_code == 0x0003) {
+            std::cout << "\n✅ Server confirmed process completion with status code: 0x0003" << std::endl;
+        } else {
+            std::cout << "\n⚠️ Unexpected status code received: " << status_code << std::endl;
+        }
+    } else {
+        std::cout << "\n❌ Failed to receive status code from server." << std::endl;
+    }
+}
+
+
+// tftp_server.cpp
+
+void informationHandler(TFTPServer& server) {
+    std::cout << "\n=== Starting Server (Data Loader) Protocol ===" << std::endl;
+
+    sockaddr_in client_addr;
+    char buffer[BUFFER_SIZE];
+
+    while (true) {
+        int client_len = sizeof(client_addr);
+        int recv_len = recvfrom(server.sockfd, buffer, BUFFER_SIZE, 0, (sockaddr*)&client_addr, &client_len);
+        if (recv_len < 4) continue;
+
+        uint16_t opcode = (buffer[0] << 8) | buffer[1];
+        std::unordered_map<std::string, std::string> options;
+        std::string filename;
+        server.parse_options(&buffer[2], recv_len - 2, filename, options);
+
+        if (opcode == OP_RRQ) {
+            std::cout << "\n[Step 1] RRQ for file: " << filename << std::endl;
+            server.handle_rrq(filename, client_addr, client_len, options);  // Handle RRQ
+
+        } else if (opcode == OP_WRQ) {
+            std::cout << "\n[Step 2] WRQ for file: " << filename << std::endl;
+            server.handle_wrq(filename, client_addr, client_len, options);  // Handle WRQ
+
+            // After handling the WRQ, check if there was a delay (based on custom logic)
+            bool delay_present = false;  // You would need to implement the actual delay check here
+            if (delay_present) {
+                // Handle LCS if delay is present
+                std::cout << "[Step 3] Handling LCS file upload due to delay." << std::endl;
+                // You would implement receiving the LCS here
+
+                // Send status code 0x0003 to finish the process
+                server.send_status_code(client_addr, client_len, 0x0003);
+            }
+        } else {
+            std::cout << "❌ Illegal operation received from client." << std::endl;
+            server.send_error(client_addr, client_len, 4, "Illegal operation");
+        }
+    }
+}
+
+// client_main.cpp
+
+#include "tftp_client.h"
+#include <iostream>
+
+int main() {
+    try {
+        std::string server_ip = "127.0.0.1";
+        TFTPClient client(server_ip, 6969);
+
+        std::string lci_file = "LCI_file_name";
+        std::string lcl_file = "LCL_file_name";
+        std::string lcs_file = "LCS_file_name";
+
+        // Call the informationHandler with the appropriate files and parameters
+        informationHandler(client, lci_file, lcl_file, lcs_file, 512, true);  // 'true' indicates delay is present
+
+    } catch (const std::exception& ex) {
+        std::cerr << "❌ Client Error: " << ex.what() << std::endl;
+    }
+    return 0;
+}
+
+// server_main.cpp
+
+#include "tftp_server.h"
+#include <iostream>
+
+int main() {
+    try {
+        TFTPServer server(6969);
+        std::cout << "🚀 TFTP Server started successfully on port 6969" << std::endl;
+
+        // Call the informationHandler to start the server-side protocol
+        informationHandler(server);
+
+    } catch (const std::exception& ex) {
+        std::cerr << "❌ Server Error: " << ex.what() << std::endl;
+    }
+    return 0;
+}
+
