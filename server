@@ -1,0 +1,181 @@
+#include "main.h"
+#include "../client/tftp_packet.h"
+#include "tftp_server.h"
+#include "utils.h"
+
+using namespace std;
+
+TFTPServer::TFTPServer(int port, char* ftproot) {
+
+    server_port = port;
+    server_socket = -1;
+    server_ftproot = ftproot;
+
+#ifdef WIN32
+    WSADATA wsaData;
+    WORD wVersionRequested = MAKEWORD(2, 2);
+    if (WSAStartup(wVersionRequested, &wsaData) != 0) {
+        throw new ETFTPSocketInitialize;
+    }
+#endif
+
+    server_socket = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (server_socket == -1) {
+        throw new ETFTPSocketCreate;
+    }
+
+    DEBUGMSG("Server UDP socket created successfully");
+
+    memset(&server_address, 0, sizeof(server_address));
+    server_address.sin_family = AF_INET;
+    server_address.sin_port = htons(port);
+    server_address.sin_addr.s_addr = INADDR_ANY;
+
+    if (bind(server_socket, (struct sockaddr*)&server_address, sizeof(server_address)) < 0) {
+        throw new ETFTPSocketBind;
+    }
+
+    DEBUGMSG("UDP socket binded to address");
+
+    cout << "TFTP UDP Server started, waiting for requests..." << endl;
+
+    while (true) {
+        receiveAndHandlePacket();
+    }
+}
+
+void TFTPServer::receiveAndHandlePacket() {
+    char buffer[TFTP_PACKET_MAX_SIZE];
+    struct sockaddr_in client_addr;
+#ifdef WIN32
+    int client_addr_len = sizeof(client_addr);
+#else
+    socklen_t client_addr_len = sizeof(client_addr);
+#endif
+
+    int received_bytes = recvfrom(server_socket, buffer, TFTP_PACKET_MAX_SIZE, 0,
+                                  (struct sockaddr*)&client_addr, &client_addr_len);
+
+    if (received_bytes < 0) {
+        DEBUGMSG("Error receiving UDP packet");
+        return;
+    }
+
+    TFTP_Packet packet;
+    packet.setData(buffer, received_bytes);
+
+    if (packet.isRRQ()) {
+        handleRRQ(packet, client_addr);
+    } else if (packet.isWRQ()) {
+        handleWRQ(packet, client_addr);
+    } else {
+        sendErrorUDP(client_addr, 4, "Invalid TFTP packet");
+    }
+}
+
+void TFTPServer::handleRRQ(const TFTP_Packet& requestPacket, sockaddr_in& client_addr) {
+    char filename[256];
+    strcpy(filename, server_ftproot);
+    requestPacket.getString(2, filename + strlen(filename), requestPacket.getSize());
+
+    ifstream file(filename, ios::binary);
+    if (!file.is_open()) {
+        sendErrorUDP(client_addr, 1, "File not found");
+        return;
+    }
+
+    int block_number = 1;
+    char data[TFTP_PACKET_DATA_SIZE];
+    bool last_packet = false;
+
+    while (!last_packet) {
+        file.read(data, TFTP_PACKET_DATA_SIZE);
+        int bytes_read = file.gcount();
+        if (bytes_read < TFTP_PACKET_DATA_SIZE) {
+            last_packet = true;
+        }
+
+        TFTP_Packet dataPacket;
+        dataPacket.createData(block_number, data, bytes_read);
+        sendto(server_socket, (char*)dataPacket.getData(), dataPacket.getSize(), 0,
+               (struct sockaddr*)&client_addr, sizeof(client_addr));
+
+        // Normally, you would wait for ACK here before continuing
+        block_number++;
+    }
+
+    file.close();
+}
+
+void TFTPServer::handleWRQ(const TFTP_Packet& requestPacket, sockaddr_in& client_addr) {
+    char filename[256];
+    strcpy(filename, server_ftproot);
+    requestPacket.getString(2, filename + strlen(filename), requestPacket.getSize());
+
+    ifstream testfile(filename);
+    if (testfile.good()) {
+        sendErrorUDP(client_addr, 6, "File already exists");
+        return;
+    }
+
+    ofstream file(filename, ios::binary);
+    if (!file.is_open()) {
+        sendErrorUDP(client_addr, 2, "Cannot create file");
+        return;
+    }
+
+    TFTP_Packet ack;
+    ack.createACK(0);
+    sendto(server_socket, (char*)ack.getData(), ack.getSize(), 0,
+           (struct sockaddr*)&client_addr, sizeof(client_addr));
+
+    char buffer[TFTP_PACKET_MAX_SIZE];
+    socklen_t client_len = sizeof(client_addr);
+    int block = 1;
+
+    while (true) {
+        int bytes = recvfrom(server_socket, buffer, sizeof(buffer), 0,
+                             (struct sockaddr*)&client_addr, &client_len);
+        if (bytes < 0) break;
+
+        TFTP_Packet packet;
+        packet.setData(buffer, bytes);
+
+        if (!packet.isData() || packet.getNumber() != block) {
+            sendErrorUDP(client_addr, 0, "Invalid block number");
+            break;
+        }
+
+        file.write(packet.getData() + 4, packet.getSize() - 4);
+
+        TFTP_Packet ack_reply;
+        ack_reply.createACK(block);
+        sendto(server_socket, (char*)ack_reply.getData(), ack_reply.getSize(), 0,
+               (struct sockaddr*)&client_addr, sizeof(client_addr));
+
+        if (packet.getSize() < TFTP_PACKET_DATA_SIZE + 4)
+            break;
+
+        block++;
+    }
+
+    file.close();
+}
+
+void TFTPServer::sendErrorUDP(sockaddr_in& client_addr, int error_no, const char* message) {
+    TFTP_Packet error_packet;
+    error_packet.createError(error_no, message);
+    sendto(server_socket, (char*)error_packet.getData(), error_packet.getSize(), 0,
+           (struct sockaddr*)&client_addr, sizeof(client_addr));
+}
+
+TFTPServer::~TFTPServer() {
+    if (server_socket != -1) {
+#ifdef WIN32
+        closesocket(server_socket);
+        WSACleanup();
+#else
+        close(server_socket);
+#endif
+    }
+}
