@@ -1,0 +1,458 @@
+// TFTP UDP Client in C++
+// Supports GET and PUT operations
+
+#include <iostream>
+#include <fstream>
+#include <cstring>
+#include <cstdlib>
+#include <cstdio>
+#ifdef _WIN32
+#include <winsock2.h>
+#else
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <unistd.h>
+#endif
+
+#define TFTP_PORT 69
+#define TFTP_PACKET_SIZE 516
+#define TFTP_DATA_SIZE 512
+#define TFTP_OP_RRQ 1
+#define TFTP_OP_WRQ 2
+#define TFTP_OP_DATA 3
+#define TFTP_OP_ACK 4
+#define TFTP_OP_ERROR 5
+
+using namespace std;
+
+class TFTPPacket {
+public:
+    char data[TFTP_PACKET_SIZE];
+    int size;
+
+    TFTPPacket() { memset(data, 0, sizeof(data)); size = 0; }
+
+    void createRRQ(const char* filename) {
+        data[0] = 0; data[1] = TFTP_OP_RRQ;
+        strcpy(&data[2], filename);
+        strcpy(&data[2 + strlen(filename) + 1], "octet");
+        size = 2 + strlen(filename) + 1 + strlen("octet") + 1;
+    }
+
+    void createWRQ(const char* filename) {
+        data[0] = 0; data[1] = TFTP_OP_WRQ;
+        strcpy(&data[2], filename);
+        strcpy(&data[2 + strlen(filename) + 1], "octet");
+        size = 2 + strlen(filename) + 1 + strlen("octet") + 1;
+    }
+
+    void createACK(uint16_t block) {
+        data[0] = 0; data[1] = TFTP_OP_ACK;
+        data[2] = block >> 8;
+        data[3] = block & 0xff;
+        size = 4;
+    }
+
+    void createData(uint16_t block, const char* buf, int len) {
+        data[0] = 0; data[1] = TFTP_OP_DATA;
+        data[2] = block >> 8;
+        data[3] = block & 0xff;
+        memcpy(&data[4], buf, len);
+        size = 4 + len;
+    }
+
+    uint16_t getOpcode() const {
+        return (uint8_t)data[1];
+    }
+
+    uint16_t getBlock() const {
+        return ((uint8_t)data[2] << 8) | (uint8_t)data[3];
+    }
+
+    int getDataSize() const {
+        return size - 4;
+    }
+
+    char* getData() { return &data[4]; }
+};
+
+class TFTPClient {
+private:
+    int sock;
+    sockaddr_in serverAddr;
+    socklen_t addrLen;
+
+public:
+    TFTPClient(const char* serverIP) {
+#ifdef _WIN32
+        WSADATA wsaData;
+        WSAStartup(MAKEWORD(2, 2), &wsaData);
+#endif
+        sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+        memset(&serverAddr, 0, sizeof(serverAddr));
+        serverAddr.sin_family = AF_INET;
+        serverAddr.sin_port = htons(TFTP_PORT);
+        serverAddr.sin_addr.s_addr = inet_addr(serverIP);
+        addrLen = sizeof(serverAddr);
+    }
+
+    ~TFTPClient() {
+#ifdef _WIN32
+        closesocket(sock);
+        WSACleanup();
+#else
+        close(sock);
+#endif
+    }
+
+    bool waitForPacket(TFTPPacket& packet, int timeoutSec) {
+        fd_set fds;
+        struct timeval timeout;
+        FD_ZERO(&fds);
+        FD_SET(sock, &fds);
+        timeout.tv_sec = timeoutSec;
+        timeout.tv_usec = 0;
+
+        int ret = select(sock + 1, &fds, NULL, NULL, &timeout);
+        if (ret > 0) {
+            packet.size = recvfrom(sock, packet.data, TFTP_PACKET_SIZE, 0,
+                                   (sockaddr*)&serverAddr, &addrLen);
+            return packet.size > 0;
+        }
+        return false;
+    }
+
+    bool waitForPacketAck(uint16_t block, int timeoutSec) {
+        TFTPPacket packet;
+        if (!waitForPacket(packet, timeoutSec)) return false;
+        return packet.getOpcode() == TFTP_OP_ACK && packet.getBlock() == block;
+    }
+
+    bool waitForPacketData(uint16_t block, TFTPPacket& packet, int timeoutSec) {
+        if (!waitForPacket(packet, timeoutSec)) return false;
+        return packet.getOpcode() == TFTP_OP_DATA && packet.getBlock() == block;
+    }
+
+    bool errorReceived(const TFTPPacket& packet) {
+        return packet.getOpcode() == TFTP_OP_ERROR;
+    }
+
+    void getFile(const char* filename, const char* dest) {
+        TFTPPacket packet;
+        packet.createRRQ(filename);
+        sendto(sock, packet.data, packet.size, 0, (sockaddr*)&serverAddr, addrLen);
+
+        ofstream file(dest, ios::binary);
+        uint16_t block = 1;
+
+        while (true) {
+            if (!waitForPacketData(block, packet, 5)) {
+                cout << "Timeout waiting for DATA block " << block << endl;
+                return;
+            }
+            if (errorReceived(packet)) {
+                cout << "Error received from server." << endl;
+                return;
+            }
+
+            file.write(packet.getData(), packet.getDataSize());
+
+            TFTPPacket ack;
+            ack.createACK(block);
+            sendto(sock, ack.data, ack.size, 0, (sockaddr*)&serverAddr, addrLen);
+
+            if (packet.getDataSize() < TFTP_DATA_SIZE) break;
+            block++;
+        }
+
+        file.close();
+        cout << "Download complete: " << dest << endl;
+    }
+
+    void putFile(const char* filename, const char* dest) {
+        TFTPPacket packet;
+        packet.createWRQ(dest);
+        sendto(sock, packet.data, packet.size, 0, (sockaddr*)&serverAddr, addrLen);
+
+        if (!waitForPacketAck(0, 5)) {
+            cout << "Did not receive initial ACK from server." << endl;
+            return;
+        }
+
+        ifstream file(filename, ios::binary);
+        if (!file.is_open()) {
+            cout << "File not found: " << filename << endl;
+            return;
+        }
+
+        uint16_t block = 1;
+        char buffer[TFTP_DATA_SIZE];
+
+        while (!file.eof()) {
+            file.read(buffer, TFTP_DATA_SIZE);
+            int bytesRead = file.gcount();
+
+            packet.createData(block, buffer, bytesRead);
+            sendto(sock, packet.data, packet.size, 0, (sockaddr*)&serverAddr, addrLen);
+
+            if (!waitForPacketAck(block, 5)) {
+                cout << "Timeout waiting for ACK block " << block << endl;
+                return;
+            }
+
+            block++;
+        }
+
+        file.close();
+        cout << "Upload complete: " << dest << endl;
+    }
+};
+
+int main() {
+    TFTPClient client("127.0.0.1");
+    client.getFile("readme.txt", "downloaded_readme.txt");
+    client.putFile("upload.txt", "uploaded_upload.txt");
+    return 0;
+}
+
+// Server
+
+#include <iostream>
+#include <fstream>
+#include <cstring>
+#ifdef _WIN32
+#include <winsock2.h>
+#pragma comment(lib, "ws2_32.lib")
+#else
+#include <sys/socket.h>
+#include <arpa/inet.h>
+#include <unistd.h>
+#include <fcntl.h>
+#endif
+
+#define TFTP_DEFAULT_PORT 69
+#define TFTP_PACKET_MAX_SIZE 516
+#define TFTP_PACKET_DATA_SIZE 512
+#define TFTP_SERVER_CLIENT_NOT_CONNECTED 0
+#define TFTP_SERVER_REQUEST_UNDEFINED 0
+#define TFTP_SERVER_REQUEST_READ 1
+#define TFTP_SERVER_REQUEST_WRITE 2
+#define TFPT_SERVER_CLIENT_ACK_WAITING 1
+#define TFPT_SERVER_CLIENT_ACK_OK 2
+
+class TFTP_Packet {
+    char data[TFTP_PACKET_MAX_SIZE];
+    int size;
+
+public:
+    void setSize(int sz) { size = sz; }
+    int getSize() { return size; }
+    char* getData() { return data; }
+    void clear() { memset(data, 0, TFTP_PACKET_MAX_SIZE); size = 0; }
+    bool isRRQ() { return data[1] == 1; }
+    bool isWRQ() { return data[1] == 2; }
+    bool isACK() { return data[1] == 4; }
+    bool isData() { return data[1] == 3; }
+    void getString(int offset, char* dest, int length) { strncpy(dest, data + offset, length - offset); }
+    int getNumber() { return (data[2] << 8) | data[3]; }
+    void createACK(int block) {
+        data[0] = 0;
+        data[1] = 4;
+        data[2] = (block >> 8) & 0xFF;
+        data[3] = block & 0xFF;
+        size = 4;
+    }
+    void createError(int code, const char* msg) {
+        data[0] = 0;
+        data[1] = 5;
+        data[2] = 0;
+        data[3] = code;
+        strcpy(data + 4, msg);
+        size = 4 + strlen(msg) + 1;
+    }
+    void createData(int block, char* buffer, int len) {
+        data[0] = 0;
+        data[1] = 3;
+        data[2] = (block >> 8) & 0xFF;
+        data[3] = block & 0xFF;
+        memcpy(data + 4, buffer, len);
+        size = len + 4;
+    }
+    void copyData(int offset, char* dest, int length) {
+        memcpy(dest, data + offset, length);
+    }
+    void dumpData() {
+        std::cout << "Dumping packet: size=" << size << std::endl;
+    }
+};
+
+struct ServerClient {
+    sockaddr_in addr;
+    socklen_t addr_len;
+    int client_socket;
+    int connected;
+    int request;
+    int block;
+    int temp;
+    bool disconnect_on_ack;
+    std::string ip;
+    TFTP_Packet last_packet;
+    TFTP_Packet last_sent_packet;
+    std::ifstream* file_rrq;
+    std::ofstream* file_wrq;
+    int acknowledged;
+};
+
+class Server {
+    int server_socket;
+    sockaddr_in server_addr;
+    ServerClient client;
+    std::string ftproot;
+
+public:
+    Server(int port, const std::string& root) : ftproot(root) {
+#ifdef _WIN32
+        WSADATA wsaData;
+        WSAStartup(MAKEWORD(2, 2), &wsaData);
+#endif
+        server_socket = socket(AF_INET, SOCK_DGRAM, 0);
+        server_addr.sin_family = AF_INET;
+        server_addr.sin_addr.s_addr = INADDR_ANY;
+        server_addr.sin_port = htons(port);
+        bind(server_socket, (sockaddr*)&server_addr, sizeof(server_addr));
+        client.client_socket = server_socket;
+        client.addr_len = sizeof(client.addr);
+        client.connected = 1;
+        client.request = TFTP_SERVER_REQUEST_UNDEFINED;
+        client.block = 0;
+        client.file_rrq = nullptr;
+        client.file_wrq = nullptr;
+    }
+
+    void waitForRequest() {
+        fd_set read_fds;
+        timeval timeout;
+        while (true) {
+            FD_ZERO(&read_fds);
+            FD_SET(server_socket, &read_fds);
+            timeout.tv_sec = 1;
+            timeout.tv_usec = 0;
+            int activity = select(server_socket + 1, &read_fds, NULL, NULL, &timeout);
+            if (FD_ISSET(server_socket, &read_fds)) {
+                if (receivePacket()) {
+                    if (client.last_packet.isRRQ()) handleGetRequest();
+                    else if (client.last_packet.isWRQ()) handlePutRequest();
+                }
+            }
+        }
+    }
+
+    bool receivePacket() {
+        client.temp = recvfrom(server_socket, (char*)client.last_packet.getData(), TFTP_PACKET_MAX_SIZE, 0, (sockaddr*)&client.addr, &client.addr_len);
+        if (client.temp <= 0) return false;
+        client.last_packet.setSize(client.temp);
+        return true;
+    }
+
+    bool sendPacket(TFTP_Packet* pkt) {
+        return sendto(server_socket, pkt->getData(), pkt->getSize(), 0, (sockaddr*)&client.addr, client.addr_len) > 0;
+    }
+
+    bool sendPacketData() {
+        char buffer[TFTP_PACKET_DATA_SIZE];
+        client.file_rrq->read(buffer, TFTP_PACKET_DATA_SIZE);
+        if (client.file_rrq->eof()) client.disconnect_on_ack = true;
+        client.block++;
+        client.last_sent_packet.createData(client.block, buffer, client.file_rrq->gcount());
+        return sendPacket(&client.last_sent_packet);
+    }
+
+    bool sendError(int code, const char* msg = (char*)"Error") {
+        TFTP_Packet pkt;
+        pkt.createError(code, msg);
+        return sendPacket(&pkt);
+    }
+
+    bool disconnectClient() {
+        client.last_packet.clear();
+        client.last_sent_packet.clear();
+        client.connected = TFTP_SERVER_CLIENT_NOT_CONNECTED;
+        client.block = 0;
+        client.request = TFTP_SERVER_REQUEST_UNDEFINED;
+        if (client.file_rrq) { if (client.file_rrq->is_open()) client.file_rrq->close(); delete client.file_rrq; client.file_rrq = nullptr; }
+        if (client.file_wrq) { if (client.file_wrq->is_open()) client.file_wrq->close(); delete client.file_wrq; client.file_wrq = nullptr; }
+        return true;
+    }
+
+    void handleGetRequest() {
+        if (client.request == TFTP_SERVER_REQUEST_READ && client.acknowledged == TFPT_SERVER_CLIENT_ACK_WAITING) {
+            if (receivePacket()) {
+                if (client.last_packet.isACK()) {
+                    if (client.block == client.last_packet.getNumber()) {
+                        client.acknowledged = TFPT_SERVER_CLIENT_ACK_OK;
+                        if (client.disconnect_on_ack) disconnectClient();
+                    } else {
+                        sendPacket(&client.last_sent_packet);
+                    }
+                }
+            }
+        } else {
+            client.request = TFTP_SERVER_REQUEST_READ;
+            char filename[256];
+            strcpy(filename, ftproot.c_str());
+            client.last_packet.getString(2, filename + strlen(filename), client.last_packet.getSize());
+            client.file_rrq = new std::ifstream(filename, std::ios::binary);
+            if (!client.file_rrq->is_open()) {
+                sendError(1, (char*)"File not found");
+                disconnectClient();
+                return;
+            }
+            if (sendPacketData()) client.acknowledged = TFPT_SERVER_CLIENT_ACK_WAITING;
+        }
+    }
+
+    void handlePutRequest() {
+        if (client.request == TFTP_SERVER_REQUEST_WRITE) {
+            if (receivePacket()) {
+                if (client.last_packet.isData()) {
+                    client.block++;
+                    if (client.block == client.last_packet.getNumber()) {
+                        char memblock[TFTP_PACKET_DATA_SIZE];
+                        client.last_packet.copyData(4, memblock, client.last_packet.getSize() - 4);
+                        client.file_wrq->write(memblock, client.last_packet.getSize() - 4);
+                        TFTP_Packet ack;
+                        ack.createACK(client.block);
+                        sendPacket(&ack);
+                        if (client.last_packet.getSize() < TFTP_PACKET_DATA_SIZE + 4) {
+                            client.file_wrq->close();
+                            disconnectClient();
+                        }
+                    } else {
+                        sendError(0, (char*)"Packet order mismatch");
+                    }
+                } else {
+                    sendError(4, (char*)"Unexpected packet");
+                    disconnectClient();
+                }
+            }
+        } else {
+            client.request = TFTP_SERVER_REQUEST_WRITE;
+            char filename[256];
+            strcpy(filename, ftproot.c_str());
+            client.last_packet.getString(2, filename + strlen(filename), client.last_packet.getSize());
+            client.file_wrq = new std::ofstream(filename, std::ios::binary);
+            TFTP_Packet ack;
+            ack.createACK(0);
+            sendPacket(&ack);
+        }
+    }
+};
+
+int main() {
+    std::string ftproot = "./"; // Current directory
+    Server server(TFTP_DEFAULT_PORT, ftproot);
+    server.waitForRequest();
+    return 0;
+}
+
